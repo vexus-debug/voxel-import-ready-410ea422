@@ -7,6 +7,16 @@
 import { defineConfig } from "@lovable.dev/vite-tanstack-config";
 
 export default defineConfig({
+  plugins: [
+    {
+      name: "voxelcraft-r3f-source-annotation-guard",
+      enforce: "pre",
+      transform(code, id) {
+        if (!id.replace(/\\/g, "/").includes("/src/game/")) return null;
+        return code.replace(/\sdata-tsd-source="[^"]*"/g, "");
+      },
+    },
+  ],
   tanstackStart: {
     // Redirect TanStack Start's bundled server entry to src/server.ts (our SSR error wrapper).
     // nitro/vite builds from this
