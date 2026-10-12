@@ -71,8 +71,10 @@ function Sky() {
   const sun = useRef<THREE.DirectionalLight>(null);
   const sunMesh = useRef<THREE.Mesh>(null);
   const moonMesh = useRef<THREE.Mesh>(null);
-  const day = useMemo(() => new THREE.Color("#f2c98a"), []);
-  const dusk = useMemo(() => new THREE.Color("#d4552c"), []);
+  const day = useMemo(() => new THREE.Color("#a9d6f5"), []);
+  const zenDay = useMemo(() => new THREE.Color("#2c74d4"), []);
+  const zen = useMemo(() => new THREE.Color(), []);
+  const dusk = useMemo(() => new THREE.Color("#e8854a"), []);
   const night = useMemo(() => new THREE.Color("#120a2a"), []);
   const col = useMemo(() => new THREE.Color(), []);
   const acc = useRef(0);
@@ -118,7 +120,9 @@ function Sky() {
       sunMesh.current.position.set(g.pos.x, g.pos.y + 1.62, g.pos.z);
       const u = skyMat.uniforms as any;
       u.sunDir.value.set(Math.cos(a), sy, 0.25).normalize();
-      u.zenith.value.copy(col).multiplyScalar(0.55 + 0.15 * light).lerp(night, (1 - light) * 0.5);
+      zen.copy(night).lerp(zenDay, light).lerp(dusk, duskAmt * light * 0.35);
+      u.zenith.value.copy(zen);
+      u.time.value += dt;
       u.horizon.value.copy(col).lerp(WHITE, 0.18 * light);
       u.sunCol.value.setRGB(1, 0.75 + 0.2 * Math.min(1, Math.max(0, sy * 2)), 0.5 + 0.35 * Math.min(1, Math.max(0, sy * 2)));
       u.night.value = 1 - light;
@@ -141,11 +145,16 @@ function Sky() {
           horizon: { value: new THREE.Color("#f2c98a") },
           sunCol: { value: new THREE.Color("#fff2c0") },
           night: { value: 0 },
+          time: { value: 0 },
         },
         vertexShader: `varying vec3 vDir; void main(){ vDir = position; gl_Position = projectionMatrix*modelViewMatrix*vec4(position,1.0); }`,
         fragmentShader: `
-          uniform vec3 sunDir, zenith, horizon, sunCol; uniform float night; varying vec3 vDir;
+          uniform vec3 sunDir, zenith, horizon, sunCol; uniform float night, time; varying vec3 vDir;
           float h(vec3 p){ return fract(sin(dot(p, vec3(12.9898,78.233,45.164)))*43758.5453); }
+          float h2(vec2 p){ return fract(sin(dot(p, vec2(127.1,311.7)))*43758.5453); }
+          float vn(vec2 p){ vec2 i=floor(p), f=fract(p); f=f*f*(3.0-2.0*f);
+            return mix(mix(h2(i),h2(i+vec2(1,0)),f.x), mix(h2(i+vec2(0,1)),h2(i+vec2(1,1)),f.x), f.y); }
+          float fbm(vec2 p){ float s=0.0,a=0.5; for(int i=0;i<5;i++){ s+=vn(p)*a; p=p*2.03+vec2(1.7,9.2); a*=0.5; } return s; }
           void main(){
             vec3 d = normalize(vDir);
             float t = pow(clamp(d.y,0.0,1.0), 0.45);
@@ -162,6 +171,19 @@ function Sky() {
             vec3 g = floor(d*400.0);
             float star = step(0.9975, h(g)) * night * smoothstep(0.0, 0.3, d.y);
             c += vec3(star);
+            // drifting cumulus clouds projected on a high plane
+            if (d.y > 0.0) {
+              vec2 cp = d.xz / (d.y + 0.08) * 1.6 + vec2(time * 0.012, time * 0.005);
+              float f = fbm(cp);
+              float cov = smoothstep(0.48, 0.72, f);
+              float under = fbm(cp + sunDir.xz * 0.06);
+              float lit = clamp(0.75 + (f - under) * 3.0, 0.45, 1.15);
+              vec3 dayCloud = mix(vec3(0.72,0.76,0.84), vec3(1.0), lit);
+              dayCloud = mix(dayCloud, dayCloud * sunCol, 0.25);
+              vec3 cc = mix(dayCloud, vec3(0.12,0.13,0.2), night);
+              float fade = smoothstep(0.0, 0.18, d.y);
+              c = mix(c, cc, cov * fade * 0.95);
+            }
             gl_FragColor = vec4(c, 1.0);
           }`,
       }),
@@ -169,7 +191,7 @@ function Sky() {
   );
   return (
     <>
-      <fog attach="fog" args={["#f2c98a", 18, RADIUS * CH - 4]} />
+      <fog attach="fog" args={["#a9d6f5", 18, RADIUS * CH - 4]} />
       <hemisphereLight ref={amb} args={["#ffe2b0", "#8a3a1e", 0.7]} />
       <directionalLight
         ref={sun}
