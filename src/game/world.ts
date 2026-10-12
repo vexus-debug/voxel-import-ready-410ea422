@@ -287,11 +287,15 @@ export function buildChunkGeometry(world: World, cx: number, cz: number) {
           const sc = 0.8 + hash2(wx, wz, 13) * 0.45;
           const quads = [[[0.1, 0.1], [0.9, 0.9]], [[0.1, 0.9], [0.9, 0.1]]];
           for (const [[ax, az], [bx, bz]] of quads) {
-            const base = pos.length / 3;
-            pos.push(wx + ax + j, y, wz + az + j2, wx + bx + j, y, wz + bz + j2, wx + ax + j, y + sc, wz + az + j2, wx + bx + j, y + sc, wz + bz + j2);
-            tileUV(16, 0, 0); tileUV(16, 1, 0); tileUV(16, 0, 1); tileUV(16, 1, 1);
-            for (const l of [0.7, 0.7, 1, 1]) col.push(l, l, l);
-            ind.push(base, base + 1, base + 2, base + 2, base + 1, base + 3, base, base + 2, base + 1, base + 2, base + 3, base + 1);
+            for (let side = 0; side < 2; side++) {
+              // separate vertices per side so normals don't cancel out (dark blades)
+              const base = pos.length / 3;
+              pos.push(wx + ax + j, y, wz + az + j2, wx + bx + j, y, wz + bz + j2, wx + ax + j, y + sc, wz + az + j2, wx + bx + j, y + sc, wz + bz + j2);
+              tileUV(16, 0, 0); tileUV(16, 1, 0); tileUV(16, 0, 1); tileUV(16, 1, 1);
+              for (const l of [0.75, 0.75, 1.1, 1.1]) col.push(l, l, l);
+              if (side) ind.push(base, base + 2, base + 1, base + 2, base + 3, base + 1);
+              else ind.push(base, base + 1, base + 2, base + 2, base + 1, base + 3);
+            }
           }
           continue;
         }
