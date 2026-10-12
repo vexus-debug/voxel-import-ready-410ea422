@@ -400,8 +400,10 @@ function Player({ zt }: { zt: React.MutableRefObject<ZombieTarget> }) {
     const t = target.current;
     const item = HOTBAR[ui.selected]!;
     if (!t || item.kind !== "block" || (ui.counts[item.block] ?? 0) <= 0) return;
-    const [x, y, z] = t.prev;
-    if (g.world.get(x, y, z) !== 0) return;
+    // aiming at tall grass replaces it directly
+    const [x, y, z] = t.id === 12 ? t.pos : t.prev;
+    const cur = g.world.get(x, y, z);
+    if (cur !== 0 && cur !== 12) return;
     g.world.set(x, y, z, item.block);
     if (collides(g.world, g.pos, 0.3, 1.8)) {
       g.world.set(x, y, z, 0);

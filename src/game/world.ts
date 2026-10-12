@@ -1,7 +1,7 @@
 // Hot numeric voxel loops: index-signature strictness is disabled here for readability.
 // @ts-nocheck
 import * as THREE from "three";
-import { B, BLOCKS, ATLAS_COLS, isTransparent } from "./blocks";
+import { B, BLOCKS, ATLAS_COLS, isTransparent, isPassable, isNatural } from "./blocks";
 
 export const CH = 16;
 export const H = 64;
@@ -244,17 +244,79 @@ const FACES = [
 const AO = [1, 0.78, 0.6, 0.45];
 const solid = (id: number) => (id !== 0 && !isTransparent(id) ? 1 : 0);
 
+// unit rock template: icosphere (non-indexed triangles)
+const ROCK = new THREE.IcosahedronGeometry(0.5, 1).getAttribute("position").array as Float32Array;
+
+/** Smooth natural terrain: pull convex edges in, push concave corners out (watertight: depends only on lattice point). */
+function smoothOffset(world: World, X: number, Y: number, Z: number, out: number[]) {
+  let cnt = 0, sx = 0, sy = 0, sz = 0;
+  for (let dy = -1; dy <= 0; dy++)
+    for (let dz = -1; dz <= 0; dz++)
+      for (let dx = -1; dx <= 0; dx++) {
+        const id = world.get(X + dx, Y + dy, Z + dz);
+        if (id === 0 || isPassable(id) || id === B.BOULDER || id === B.LEAVES) continue;
+        if (!isNatural(id)) { out[0] = out[1] = out[2] = 0; return; }
+        cnt++; sx += dx + 0.5; sy += dy + 0.5; sz += dz + 0.5;
+      }
+  if (cnt === 0 || cnt === 8 || cnt === 4) { out[0] = out[1] = out[2] = 0; return; }
+  const k = ((4 - cnt) / 4) / cnt * 0.85;
+  out[0] = sx * k; out[1] = sy * k; out[2] = sz * k;
+}
+
 export function buildChunkGeometry(world: World, cx: number, cz: number) {
   const chunk = world.getChunk(cx, cz);
   const pos: number[] = [], uv: number[] = [], col: number[] = [], ind: number[] = [];
   const ox = cx * CH, oz = cz * CH;
   const eps = 0.001;
+  const off = [0, 0, 0];
+  const tileUV = (tile: number, u: number, v: number) => {
+    const tc = tile % ATLAS_COLS, tr = Math.floor(tile / ATLAS_COLS);
+    u = Math.min(1 - eps, Math.max(eps, u)); v = Math.min(1 - eps, Math.max(eps, v));
+    uv.push((tc + u) / ATLAS_COLS, 1 - (tr + 1 - v) / ATLAS_COLS);
+  };
   for (let y = 0; y < H; y++)
     for (let z = 0; z < CH; z++)
       for (let x = 0; x < CH; x++) {
         const id = chunk[idx(x, y, z)];
         if (!id) continue;
         const def = BLOCKS[id];
+        const wx = ox + x, wz = oz + z;
+        if (id === B.TALLGRASS) {
+          // two crossed double-sided blades
+          const j = (hash2(wx, wz, 5) - 0.5) * 0.3, j2 = (hash2(wx, wz, 9) - 0.5) * 0.3;
+          const sc = 0.8 + hash2(wx, wz, 13) * 0.45;
+          const quads = [[[0.1, 0.1], [0.9, 0.9]], [[0.1, 0.9], [0.9, 0.1]]];
+          for (const [[ax, az], [bx, bz]] of quads) {
+            for (let side = 0; side < 2; side++) {
+              // separate vertices per side so normals don't cancel out (dark blades)
+              const base = pos.length / 3;
+              pos.push(wx + ax + j, y, wz + az + j2, wx + bx + j, y, wz + bz + j2, wx + ax + j, y + sc, wz + az + j2, wx + bx + j, y + sc, wz + bz + j2);
+              tileUV(16, 0, 0); tileUV(16, 1, 0); tileUV(16, 0, 1); tileUV(16, 1, 1);
+              for (const l of [0.75, 0.75, 1.1, 1.1]) col.push(l, l, l);
+              if (side) ind.push(base, base + 2, base + 1, base + 2, base + 3, base + 1);
+              else ind.push(base, base + 1, base + 2, base + 2, base + 1, base + 3);
+            }
+          }
+          continue;
+        }
+        if (id === B.BOULDER) {
+          const s = 0.75 + hash2(wx, wz + y, 17) * 0.4, sy = 0.6 + hash2(wx, wz, 19) * 0.3;
+          const rot = hash2(wx, wz, 23) * Math.PI * 2, cr = Math.cos(rot), sr = Math.sin(rot);
+          const base = pos.length / 3;
+          for (let i = 0; i < ROCK.length; i += 3) {
+            const px = ROCK[i], py = ROCK[i + 1], pz = ROCK[i + 2];
+            const q = Math.round(px * 97) * 7 + Math.round(py * 97) * 131 + Math.round(pz * 97) * 977;
+            const d = 0.8 + hash2(q, wx * 31 + wz, y) * 0.4;
+            const rx = (px * cr - pz * sr) * d * s, rz = (px * sr + pz * cr) * d * s, ry = py * d * sy;
+            pos.push(wx + 0.5 + rx, y + Math.max(-0.05, ry + sy * 0.4), wz + 0.5 + rz);
+            tileUV(3, rx + 0.5, ry + rz + 0.5);
+            const l = 0.75 + 0.25 * (py + 0.5);
+            col.push(l, l, l);
+            ind.push(base + i / 3);
+          }
+          continue;
+        }
+        const nat = isNatural(id);
         for (let f = 0; f < 6; f++) {
           const F = FACES[f];
           const nx = x + F.d[0], ny = y + F.d[1], nz = z + F.d[2];
@@ -283,7 +345,9 @@ export function buildChunkGeometry(world: World, cx: number, cz: number) {
           }
           let k = 0;
           for (const c of F.c) {
-            pos.push(ox + x + c[0], y + c[1], oz + z + c[2]);
+            const X = ox + x + c[0], Y = y + c[1], Z = oz + z + c[2];
+            if (nat) smoothOffset(world, X, Y, Z, off); else off[0] = off[1] = off[2] = 0;
+            pos.push(X + off[0], Y + off[1], Z + off[2]);
             const u = (tc + (c[3] ? 1 - eps : eps)) / ATLAS_COLS;
             const v = 1 - (tr + 1 - (c[4] ? 1 - eps : eps)) / ATLAS_COLS;
             uv.push(u, v);
@@ -312,7 +376,7 @@ export function collides(world: World, p: THREE.Vector3, hw: number, h: number) 
   for (let x = Math.floor(p.x - hw + e); x <= Math.floor(p.x + hw - e); x++)
     for (let y = Math.floor(p.y + e); y <= Math.floor(p.y + h - e); y++)
       for (let z = Math.floor(p.z - hw + e); z <= Math.floor(p.z + hw - e); z++)
-        if (world.get(x, y, z) !== 0) return true;
+        if (!isPassable(world.get(x, y, z))) return true;
   return false;
 }
 
