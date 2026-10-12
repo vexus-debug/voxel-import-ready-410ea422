@@ -15,6 +15,12 @@ export const B = {
   BEDROCK: 11,
   TALLGRASS: 12,
   BOULDER: 13,
+  WATER: 14,
+  FLOWER: 15,
+  REED: 16,
+  ALOE: 17,
+  JUNGLE_GRASS: 18,
+  FERN: 19,
 } as const;
 
 export type Tool = "pickaxe" | "axe" | "shovel";
@@ -42,6 +48,12 @@ export const BLOCKS: Record<number, BlockDef> = {
   [B.BEDROCK]: { name: "Bedrock", hardness: Infinity, tool: null, tiles: [12, 12, 12], drop: 0 },
   [B.TALLGRASS]: { name: "Tall Grass", hardness: 0.05, tool: null, tiles: [16, 16, 16], drop: 0, transparent: true },
   [B.BOULDER]: { name: "Boulder", hardness: 3, tool: "pickaxe", tiles: [3, 3, 3], drop: B.COBBLE, transparent: true },
+  [B.WATER]: { name: "Water", hardness: Infinity, tool: null, tiles: [20, 20, 20], drop: 0, transparent: true },
+  [B.FLOWER]: { name: "Wildflowers", hardness: 0.05, tool: null, tiles: [17, 17, 17], drop: 0, transparent: true },
+  [B.REED]: { name: "Papyrus Reeds", hardness: 0.05, tool: null, tiles: [18, 18, 18], drop: 0, transparent: true },
+  [B.ALOE]: { name: "Aloe", hardness: 0.1, tool: null, tiles: [19, 19, 19], drop: 0, transparent: true },
+  [B.JUNGLE_GRASS]: { name: "Rainforest Grass", hardness: 0.9, tool: "shovel", tiles: [21, 22, 2], drop: B.DIRT },
+  [B.FERN]: { name: "Fern", hardness: 0.05, tool: null, tiles: [23, 23, 23], drop: 0, transparent: true },
 };
 
 export type Item =
@@ -62,9 +74,10 @@ export const HOTBAR: Item[] = [
 
 export const isTransparent = (id: number) => id === 0 || !!BLOCKS[id]?.transparent;
 /** blocks the player walks through (air + plants) */
-export const isPassable = (id: number) => id === 0 || id === B.TALLGRASS;
+export const isPlant = (id: number) => id === B.TALLGRASS || id === B.FLOWER || id === B.REED || id === B.ALOE || id === B.FERN;
+export const isPassable = (id: number) => id === 0 || id === B.WATER || isPlant(id);
 /** natural terrain that gets smoothed into organic shapes */
-export const isNatural = (id: number) => id === B.GRASS || id === B.DIRT || id === B.STONE || id === B.SAND;
+export const isNatural = (id: number) => id === B.GRASS || id === B.DIRT || id === B.STONE || id === B.SAND || id === B.JUNGLE_GRASS;
 
 
 // ---------- Procedural texture atlas (4x4 tiles, 16px each) ----------
@@ -228,6 +241,61 @@ export function drawAtlas(): HTMLCanvasElement {
         const base = mix([110, 120, 40], [214, 186, 96], k * 0.7 + b.t * 0.4);
         return [...mul(base, 0.85 + (n - 0.5) * 0.15), 255];
       }
+    }
+    return [0, 0, 0, 0];
+  });
+  // plant sprite helper: tapered stems with optional heads
+  const sprite = (tile: number, n0: number, stem: number[], head: ((k: number) => number[]) | null, hmin: number, hmax: number, wid: number) => {
+    const st = Array.from({ length: n0 }, (_, i) => ({ x: 0.08 + (i / n0) * 0.84 + (r() - 0.5) * 0.06, h: hmin + r() * (hmax - hmin), w: wid * (0.7 + r() * 0.6), lean: (r() - 0.5) * 0.3, k: r() }));
+    put(tile, (u, v, n) => {
+      const y = 1 - v;
+      for (const b of st) {
+        if (y > b.h + 0.08) continue;
+        const k = Math.min(1, y / b.h), cx = b.x + b.lean * k * k;
+        if (head && y > b.h - 0.06 && Math.hypot((u - cx) * 1.2, y - b.h) < 0.075) return [...head(b.k).map((c) => c * (0.85 + (n - 0.5) * 0.2)), 255];
+        if (y <= b.h && Math.abs(u - cx) < b.w * (1 - k * 0.6)) return [...mul(stem, 0.8 + k * 0.35 + (n - 0.5) * 0.15), 255];
+      }
+      return [0, 0, 0, 0];
+    });
+  };
+  const petals = [[220, 50, 40], [245, 200, 40], [90, 120, 220], [240, 240, 230], [230, 110, 30]];
+  sprite(17, 9, [80, 120, 40], (k) => petals[Math.floor(k * petals.length)], 0.3, 0.7, 0.018);
+  sprite(18, 8, [96, 132, 50], () => [150, 160, 80], 0.75, 0.98, 0.022);
+  // aloe: fleshy rosette of spiky leaves fanning from the base
+  put(19, (u, v, n) => {
+    const y = 1 - v, dx = u - 0.5;
+    for (let i = 0; i < 7; i++) {
+      const ang = -1.2 + (i / 6) * 2.4, len = 0.55 + ((i * 37) % 5) * 0.06;
+      const t = (dx * Math.sin(ang) + y * Math.cos(ang)) / len, off = Math.abs(dx * Math.cos(ang) - y * Math.sin(ang));
+      if (t > 0 && t < 1 && off < 0.07 * (1 - t)) return [...mul(mix([70, 110, 80], [120, 150, 100], t), 0.85 + (n - 0.5) * 0.2), 255];
+    }
+    if (y > 0.5 && y < 0.95 && Math.abs(dx - 0.05) < 0.012) return [120, 100, 60, 255];
+    if (y > 0.85 && y < 0.98 && Math.abs(dx - 0.05) < 0.04) return [230, 90, 40, 255];
+    return [0, 0, 0, 0];
+  });
+  put(20, (u, v, n) => {
+    const w = N(u, v, 4, 3), rip = 0.5 + 0.5 * Math.sin((u + w * 0.6) * Math.PI * 8);
+    return [...mul(mix([40, 110, 150], [80, 170, 200], w * 0.7 + rip * 0.3), 0.95 + (n - 0.5) * 0.06), 255];
+  });
+  const jgCol = (u: number, v: number, n: number) => {
+    const big = N(u, v, 2, 3), fine = M(u, v, 16, 2);
+    return mul(mix([46, 104, 34], [86, 150, 50], big), 0.82 + fine * 0.3 + (n - 0.5) * 0.12);
+  };
+  put(21, jgCol);
+  put(22, (u, v, n) => {
+    const edge = 0.16 + N(u, 0.5, 8, 2) * 0.18;
+    return v < edge ? jgCol(u, v, n) : dirtCol(u, v, n);
+  });
+  // fern: arching fronds with leaflets
+  put(23, (u, v, n) => {
+    const y = 1 - v, dx = u - 0.5;
+    for (let i = 0; i < 5; i++) {
+      const ang = -1.0 + (i / 4) * 2.0;
+      const t = (dx * Math.sin(ang) + y * Math.cos(ang)) / 0.8, off = dx * Math.cos(ang) - y * Math.sin(ang);
+      if (t <= 0 || t >= 1) continue;
+      const bend = off + t * t * 0.15 * Math.sign(ang || 1);
+      if (Math.abs(bend) < 0.012) return [60, 100, 30, 255];
+      if (Math.abs(bend) < 0.09 * (1 - t) && Math.sin(t * 60) > -0.2) return [...mul([60, 130, 45], 0.8 + t * 0.4 + (n - 0.5) * 0.15), 255];
     }
     return [0, 0, 0, 0];
   });
