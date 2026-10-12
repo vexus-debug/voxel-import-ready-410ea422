@@ -1,10 +1,11 @@
 // Hot numeric voxel loops: index-signature strictness is disabled here for readability.
 // @ts-nocheck
 import * as THREE from "three";
-import { B, BLOCKS, ATLAS_COLS, isTransparent, isPassable, isNatural } from "./blocks";
+import { B, BLOCKS, ATLAS_COLS, isTransparent, isPassable, isNatural, isPlant } from "./blocks";
 
 export const CH = 16;
 export const H = 64;
+export const WATER_LEVEL = 15;
 
 export function hash2(x: number, z: number, seed: number) {
   let h = Math.imul(x, 374761393) + Math.imul(z, 668265263) + Math.imul(seed, 982451653);
@@ -52,16 +53,32 @@ export class World {
     }
     return v;
   }
+  /** 0 = desert, 1 = rainforest, in between = savanna (smooth weights) */
+  biome(x: number, z: number) {
+    const t = fbm(x / 420, z / 420, this.seed + 91, 3);
+    const desert = Math.max(0, Math.min(1, (0.42 - t) / 0.07));
+    const jungle = Math.max(0, Math.min(1, (t - 0.58) / 0.07));
+    return { desert, jungle };
+  }
   private computeHeight(x: number, z: number) {
+    const { desert, jungle } = this.biome(x, z);
     // rolling savanna hills: domain-warped broad swells
     const wx = x + (fbm(x / 90, z / 90, this.seed + 21, 2) - 0.5) * 40;
     const wz = z + (fbm(x / 90, z / 90, this.seed + 23, 2) - 0.5) * 40;
     const n = fbm(wx / 70, wz / 70, this.seed, 4);
     const m = fbm(wx / 220, wz / 220, this.seed + 7, 2);
-    let h = 14 + n * 6 + m * 9;
+    let h = 15 + n * 6 + m * 9;
+    // sinuous desert dunes (sharp crest ridges)
+    if (desert > 0) {
+      const dn = noise(wx / 26 + m * 3, wz / 60, this.seed + 95);
+      const dune = 16 + Math.pow(1 - Math.abs(dn * 2 - 1), 2) * 11 + n * 3;
+      h += (dune - h) * desert;
+    }
+    // rainforest: lower, lumpier valleys
+    if (jungle > 0) h += (13 + n * 9 + fbm(wx / 30, wz / 30, this.seed + 97, 3) * 5 - h) * jungle;
     // mountain ranges: a continental mask gates ridged noise -> sharp crests & cliffs
     const mask = fbm(x / 340, z / 340, this.seed + 41, 2);
-    const mt = Math.max(0, Math.min(1, (mask - 0.52) / 0.14));
+    const mt = Math.max(0, Math.min(1, (mask - 0.52) / 0.14)) * (1 - desert);
     if (mt > 0) {
       let rid = 0, amp = 0.5, f = 1 / 60, w = 1;
       for (let o = 0; o < 4; o++) {
@@ -71,12 +88,17 @@ export class World {
       }
       h += mt * mt * (3 - 2 * mt) * rid * 46;
     }
-    // dry riverbeds (wadis)
+    // rivers (deep & wet in the rainforest, dry wadis elsewhere)
     const r = Math.abs(fbm(wx / 120, wz / 120, this.seed + 31, 2) - 0.5);
-    if (r < 0.04 && mt < 0.3) h -= (1 - r / 0.04) ** 2 * 3;
-    // granite kopjes on the plains
+    const rw = 0.04 + jungle * 0.02;
+    if (r < rw && mt < 0.3) h -= (1 - r / rw) ** 2 * (3 + jungle * 5);
+    // watering holes & oases
+    const p = fbm(x / 55, z / 55, this.seed + 101, 3);
+    if (p > 0.66 && mt < 0.2) { const t = Math.min(1, (p - 0.66) / 0.08); h -= t * t * (3 - 2 * t) * (6 + desert * 6); }
+    // granite kopjes on the savanna plains
     const k = fbm(x / 22, z / 22, this.seed + 11, 3);
-    if (k > 0.6 && mt < 0.2) { const t = Math.min(1, (k - 0.6) / 0.12); h += t * t * (3 - 2 * t) * 10; }
+    const sav = 1 - Math.max(desert, jungle);
+    if (k > 0.6 && mt < 0.2) { const t = Math.min(1, (k - 0.6) / 0.12); h += t * t * (3 - 2 * t) * 10 * sav; }
     return Math.max(4, Math.min(H - 6, Math.floor(h)));
   }
   isKopje(x: number, z: number) {
@@ -99,83 +121,149 @@ export class World {
   private generate(cx: number, cz: number) {
     const c = new Uint8Array(CH * H * CH);
     const heights: number[] = [];
+    const biomes: number[] = []; // 0 savanna, 1 desert, 2 jungle
     for (let z = 0; z < CH; z++)
       for (let x = 0; x < CH; x++) {
         const wx = cx * CH + x, wz = cz * CH + z;
         const h = this.height(wx, wz);
         heights[z * CH + x] = h;
-        const beach = h <= 15;
+        const bm = this.biome(wx, wz);
+        const kind = bm.desert > 0.5 ? 1 : bm.jungle > 0.5 ? 2 : 0;
+        biomes[z * CH + x] = kind;
+        const beach = h <= WATER_LEVEL + 1;
         const slope = Math.max(
           Math.abs(this.height(wx + 1, wz) - h), Math.abs(this.height(wx - 1, wz) - h),
           Math.abs(this.height(wx, wz + 1) - h), Math.abs(this.height(wx, wz - 1) - h),
         );
-        const rock = (this.isKopje(wx, wz) && !this.isMountain(wx, wz)) || slope >= 3 || h > 38 + hash2(wx, wz, this.seed + 61) * 4;
-        const soil = h > 28 ? 2 : 4;
+        const rock = kind !== 1 && ((kind === 0 && this.isKopje(wx, wz) && !this.isMountain(wx, wz)) || slope >= 3 || h > 38 + hash2(wx, wz, this.seed + 61) * 4);
+        const soil = kind === 1 ? 6 : h > 28 ? 2 : 4;
+        const topId = kind === 1 || beach ? B.SAND : kind === 2 ? B.JUNGLE_GRASS : B.GRASS;
         for (let y = 0; y <= h; y++) {
           let id: number = B.STONE;
           if (y === 0) id = B.BEDROCK;
-          else if (!rock && y >= h - soil) id = y === h ? (beach ? B.SAND : B.GRASS) : beach ? B.SAND : B.DIRT;
+          else if (!rock && y >= h - soil) id = y === h ? topId : kind === 1 || beach ? B.SAND : B.DIRT;
           c[idx(x, y, z)] = id;
         }
+        for (let y = h + 1; y <= WATER_LEVEL; y++) c[idx(x, y, z)] = B.WATER;
       }
-    // ground cover: tall grass meadows + scattered boulders
-    for (let z = 0; z < CH; z++)
-      for (let x = 0; x < CH; x++) {
-        const wx = cx * CH + x, wz = cz * CH + z;
-        const h = heights[z * CH + x];
-        if (h + 1 >= H) continue;
-        const top = c[idx(x, h, z)];
-        const rr = hash2(wx, wz, this.seed + 71);
-        if (top === B.GRASS) {
-          const meadow = fbm(wx / 28, wz / 28, this.seed + 81, 3);
-          const dens = meadow > 0.55 ? 0.85 : meadow > 0.45 ? 0.25 : 0.03;
-          if (rr < dens) c[idx(x, h + 1, z)] = B.TALLGRASS;
-          else if (rr > 0.997) c[idx(x, h + 1, z)] = B.BOULDER;
-        } else if (top === B.STONE && rr < 0.035) c[idx(x, h + 1, z)] = B.BOULDER;
-      }
-
     const put = (x: number, y: number, z: number, id: number, force = false) => {
       if (x < 0 || z < 0 || x >= CH || z >= CH || y < 1 || y >= H) return;
       const i = idx(x, y, z);
-      if (force || c[i] === 0) c[i] = id;
+      if (force || c[i] === 0 || isPlant(c[i])) c[i] = id;
     };
+    // ground cover
+    for (let z = 0; z < CH; z++)
+      for (let x = 0; x < CH; x++) {
+        const wx = cx * CH + x, wz = cz * CH + z;
+        const h = heights[z * CH + x], kind = biomes[z * CH + x];
+        if (h + 3 >= H) continue;
+        const top = c[idx(x, h, z)], above = c[idx(x, h + 1, z)];
+        const rr = hash2(wx, wz, this.seed + 71), r2 = hash2(wx, wz, this.seed + 73);
+        if (above === B.WATER) {
+          // papyrus in shallow water
+          if (h === WATER_LEVEL - 1 && rr < 0.45) c[idx(x, h + 1, z)] = B.REED;
+          continue;
+        }
+        if (top === B.SAND && h <= WATER_LEVEL + 2 && kind !== 1 ? rr < 0.25 : top === B.SAND && h <= WATER_LEVEL + 1 && rr < 0.35) { c[idx(x, h + 1, z)] = B.REED; continue; }
+        if (top === B.GRASS) {
+          const meadow = fbm(wx / 28, wz / 28, this.seed + 81, 3);
+          const dens = meadow > 0.55 ? 0.8 : meadow > 0.45 ? 0.25 : 0.04;
+          if (rr < dens) c[idx(x, h + 1, z)] = B.TALLGRASS;
+          else if (r2 < 0.05 && meadow > 0.4) c[idx(x, h + 1, z)] = B.FLOWER;
+          else if (rr > 0.997) c[idx(x, h + 1, z)] = B.BOULDER;
+          else if (rr > 0.9955 && x > 0 && z > 0 && x < CH - 1 && z < CH - 1) {
+            // termite mound: tapered red-clay spire (smoothing rounds it off)
+            const mh = 2 + Math.floor(r2 * 3);
+            for (let y = 1; y <= mh; y++) put(x, h + y, z, B.DIRT, true);
+            for (const [dx, dz] of [[1, 0], [-1, 0], [0, 1], [0, -1]]) put(x + dx, h + 1, z + dz, B.DIRT, true);
+          }
+        } else if (top === B.JUNGLE_GRASS) {
+          if (rr < 0.35) c[idx(x, h + 1, z)] = B.FERN;
+          else if (rr < 0.6) c[idx(x, h + 1, z)] = B.TALLGRASS;
+          else if (rr < 0.63) c[idx(x, h + 1, z)] = B.FLOWER;
+        } else if (top === B.SAND && kind === 1) {
+          if (rr < 0.004) c[idx(x, h + 1, z)] = B.ALOE;
+          else if (rr > 0.9985) c[idx(x, h + 1, z)] = B.BOULDER;
+        } else if (top === B.STONE) {
+          if (rr < 0.035) c[idx(x, h + 1, z)] = B.BOULDER;
+          else if (rr < 0.07 && kind === 0) c[idx(x, h + 1, z)] = B.ALOE;
+        }
+      }
+
+    const blob = (tx: number, ty: number, tz: number, rx: number, ry: number) => {
+      for (let dy = -ry; dy <= ry; dy++)
+        for (let dz = -rx; dz <= rx; dz++)
+          for (let dx = -rx; dx <= rx; dx++)
+            if ((dx * dx + dz * dz) / (rx * rx + 0.5) + (dy * dy) / (ry * ry + 0.5) <= 1) put(tx + dx, ty + dy, tz + dz, B.LEAVES);
+    };
+    const DIRS = [[1, 0], [-1, 0], [0, 1], [0, -1]];
     // flora (kept inside the chunk)
     for (let z = 4; z < CH - 4; z++)
       for (let x = 4; x < CH - 4; x++) {
         const wx = cx * CH + x, wz = cz * CH + z;
-        const h = heights[z * CH + x];
-        if (c[idx(x, h, z)] !== B.GRASS) continue;
+        const h = heights[z * CH + x], kind = biomes[z * CH + x];
+        const top = c[idx(x, h, z)];
+        if (h + 14 >= H || c[idx(x, h + 1, z)] === B.WATER) continue;
         const r = hash2(wx, wz, this.seed + 3);
+        const hr = hash2(wx, wz, this.seed + 5);
+        // date palms around oases and shores
+        const shore = h <= WATER_LEVEL + 3 && top === B.SAND;
+        if ((shore && r < 0.03) || (kind === 2 && top === B.JUNGLE_GRASS && r > 0.992)) {
+          const th = 5 + Math.floor(hr * 3);
+          const [ldx, ldz] = DIRS[Math.floor(hash2(wx, wz, this.seed + 9) * 4)];
+          let px = x, pz = z;
+          for (let y = 1; y <= th; y++) {
+            if (y === Math.floor(th * 0.6)) { px += ldx; pz += ldz; } // gentle lean
+            put(px, h + y, pz, B.LOG, true);
+          }
+          const ty = h + th;
+          put(px, ty + 1, pz, B.LEAVES);
+          for (const [dx, dz] of [[1, 0], [-1, 0], [0, 1], [0, -1], [1, 1], [-1, -1], [1, -1], [-1, 1]]) {
+            put(px + dx, ty + 1, pz + dz, B.LEAVES);
+            put(px + dx * 2, ty, pz + dz * 2, B.LEAVES);
+            if (!dx || !dz) put(px + dx * 3, ty - 1, pz + dz * 3, B.LEAVES);
+          }
+          c[idx(x, h, z)] = top === B.SAND ? B.SAND : B.DIRT;
+          continue;
+        }
+        if (top === B.JUNGLE_GRASS && r < 0.045) {
+          // rainforest giant: tall straight trunk, buttress roots, layered round canopy
+          const th = 7 + Math.floor(hr * 5);
+          for (let y = 1; y <= th; y++) put(x, h + y, z, B.LOG, true);
+          for (const [dx, dz] of DIRS) put(x + dx, h + 1, z + dz, B.LOG, true);
+          blob(x, h + th + 1, z, 3, 2);
+          const [bx, bz] = DIRS[Math.floor(hash2(wx, wz, this.seed + 9) * 4)];
+          blob(x + bx * 2, h + th - 2, z + bz * 2, 2, 1);
+          c[idx(x, h, z)] = B.DIRT;
+          continue;
+        }
+        if (top !== B.GRASS) continue;
         if (r < 0.0025) {
-          // Baobab: fat 2x2 swollen trunk, short branches, small crown
-          const th = 8 + Math.floor(hash2(wx, wz, this.seed + 5) * 4);
-          for (let y = h + 1; y <= h + th; y++)
-            for (let dz = -1; dz <= 1; dz++)
-              for (let dx = -1; dx <= 1; dx++) {
-                const mid = y - h > 2 && y - h < th - 2;
-                if (!mid && Math.abs(dx) + Math.abs(dz) === 2) continue;
-                put(x + dx, y, z + dz, B.LOG, true);
-              }
-          const top = h + th;
+          // Baobab: fat swollen bottle trunk, stubby branches, small tufted crowns
+          const th = 7 + Math.floor(hr * 4);
+          for (let y = h + 1; y <= h + th; y++) {
+            const k = (y - h) / th, rad = k < 0.75 ? 1.6 : 0.9;
+            for (let dz = -2; dz <= 2; dz++)
+              for (let dx = -2; dx <= 2; dx++) if (dx * dx + dz * dz <= rad * rad) put(x + dx, y, z + dz, B.LOG, true);
+          }
+          const top2 = h + th;
           for (const [bx, bz] of [[1, 0], [-1, 0], [0, 1], [0, -1], [1, 1], [-1, -1]]) {
-            for (let s2 = 1; s2 <= 2; s2++) put(x + bx * (1 + s2), top + s2 - 1, z + bz * (1 + s2), B.LOG, true);
-            const lx = x + bx * 3, lz = z + bz * 3, ly = top + 2;
-            for (let dz = -1; dz <= 1; dz++) for (let dx = -1; dx <= 1; dx++) { put(lx + dx, ly, lz + dz, B.LEAVES); if (!dx || !dz) put(lx + dx, ly + 1, lz + dz, B.LEAVES); }
+            for (let s2 = 1; s2 <= 2; s2++) put(x + bx * (1 + s2), top2 + s2 - 1, z + bz * (1 + s2), B.LOG, true);
+            blob(x + bx * 3, top2 + 2, z + bz * 3, 1, 1);
           }
           c[idx(x, h, z)] = B.DIRT;
         } else if (r < 0.014) {
-          // Acacia: straight trunk that forks into 2 rising limbs, each carrying a flat umbrella pad
-          const th = 3 + Math.floor(hash2(wx, wz, this.seed + 5) * 2);
+          // Umbrella acacia: trunk forks into rising limbs, each carrying a wide flat canopy
+          const th = 3 + Math.floor(hr * 2);
           for (let y = h + 1; y <= h + th; y++) put(x, y, z, B.LOG, true);
-          const DIRS = [[1, 0], [-1, 0], [0, 1], [0, -1]];
           const d0 = Math.floor(hash2(wx, wz, this.seed + 9) * 4);
-          const limbs = [DIRS[d0], DIRS[d0 ^ 1]]; // opposite directions
+          const limbs = [DIRS[d0], DIRS[d0 ^ 1]];
           if (hash2(wx, wz, this.seed + 13) > 0.6) limbs.push(DIRS[(d0 + 2) % 4]);
           const tips: number[][] = [];
           for (const [ldx, ldz] of limbs) {
             let bx = x, by = h + th, bz = z;
             for (let s2 = 0; s2 < 2; s2++) {
-              bx += ldx; bz += ldz; put(bx, by, bz, B.LOG, true); // diagonal staircase stays connected
+              bx += ldx; bz += ldz; put(bx, by, bz, B.LOG, true);
               by++; put(bx, by, bz, B.LOG, true);
             }
             tips.push([bx, by, bz]);
@@ -423,7 +511,7 @@ export function raycast(world: World, o: THREE.Vector3, d: THREE.Vector3, max: n
   let t = 0;
   while (t <= max) {
     const id = world.get(x, y, z);
-    if (id !== 0) return { pos: [x, y, z] as [number, number, number], prev, id, dist: t };
+    if (id !== 0 && id !== B.WATER) return { pos: [x, y, z] as [number, number, number], prev, id, dist: t };
     prev = [x, y, z];
     if (tx < ty && tx < tz) { x += sx; t = tx; tx += tdx; }
     else if (ty < tz) { y += sy; t = ty; ty += tdy; }
